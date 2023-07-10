@@ -1,0 +1,109 @@
+name: Release
+on: 
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release ex.: "v10.40.0" (leave blank for latest)'
+        required: false
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Get latest RealmSwift version
+        run: |
+          # Check if version input is empty
+          if [[ -z "${{ github.event.inputs.version }}" || "${{ github.event.inputs.version }}" == "null" ]]; then
+            # Get the latest version of RealmSwift from GitHub API
+            version=$(curl -s https://api.github.com/repos/realm/realm-swift/releases/latest | jq -r '.tag_name')
+          else
+            # Use given version for release
+            version=${{ github.event.inputs.version }}
+          fi
+          echo "LATEST_REALM=$version" >> $GITHUB_ENV
+      - name: Get latest binary version
+        run: |
+          # Get the latest version of the binary from GitHub API
+          version=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.tag_name')
+          echo "LATEST_RELEASE=$version" >> $GITHUB_ENV
+      - name: Check for updates
+        run: |
+          # Exit if no updates are available
+          if [[ "${{ env.LATEST_REALM }}" == "${{ env.LATEST_RELEASE }}" ]]; then
+            echo "Latest version of Realm is already released!"
+            exit 1
+          fi
+      - name: Download, extract and prepare xcframeworks
+        run: |
+          # Download an unzip Carthage.xcframework.zip from the latest release
+          download_url=$(curl -s https://api.github.com/repos/realm/realm-swift/releases/tags/${{ env.LATEST_REALM }} | jq -r '.assets[] | select(.name=="Carthage.xcframework.zip").browser_download_url')
+          mkdir -p /tmp/realm
+          curl -L $download_url -o /tmp/realm/Carthage.xcframework.zip
+          unzip /tmp/realm/Carthage.xcframework.zip -d /tmp/realm/Carthage.xcframework
+          
+          # Create new folders for our xcframeworks
+          mkdir /tmp/realm/Realm.xcframework
+          mkdir /tmp/realm/RealmSwift.xcframework
+
+          # Copy binaries for supported architectures from the downloaded xcframework
+          cp -r /tmp/realm/Carthage.xcframework/Realm.xcframework/ios-arm64 /tmp/realm/Realm.xcframework || exit 1
+          cp -r /tmp/realm/Carthage.xcframework/Realm.xcframework/ios-arm64_x86_64-simulator /tmp/realm/Realm.xcframework || exit 1
+          cp -r /tmp/realm/Carthage.xcframework/RealmSwift.xcframework/ios-arm64 /tmp/realm/RealmSwift.xcframework || exit 1
+          cp -r /tmp/realm/Carthage.xcframework/RealmSwift.xcframework/ios-arm64_x86_64-simulator /tmp/realm/RealmSwift.xcframework || exit 1
+
+          # Copy Info.plist files for the frameworks and remove unsupported architectures
+          cp /tmp/realm/Carthage.xcframework/Realm.xcframework/Info.plist /tmp/realm/Info-Realm.plist || exit 1
+          cp /tmp/realm/Carthage.xcframework/RealmSwift.xcframework/Info.plist /tmp/realm/Info-RealmSwift.plist || exit 1
+          plutil -convert json -o /tmp/realm/Info-Realm.json /tmp/realm/Info-Realm.plist
+          plutil -convert json -o /tmp/realm/Info-RealmSwift.json /tmp/realm/Info-RealmSwift.plist
+          jq '.AvailableLibraries |= map(select(.LibraryIdentifier=="ios-arm64" or .LibraryIdentifier=="ios-arm64_x86_64-simulator"))' /tmp/realm/Info-Realm.json > /tmp/realm/Info-Realm-Filtered.json
+          jq '.AvailableLibraries |= map(select(.LibraryIdentifier=="ios-arm64" or .LibraryIdentifier=="ios-arm64_x86_64-simulator"))' /tmp/realm/Info-RealmSwift.json > /tmp/realm/Info-RealmSwift-Filtered.json
+          plutil -convert xml1 -o /tmp/realm/Realm.xcframework/Info.plist /tmp/realm/Info-Realm-Filtered.json
+          plutil -convert xml1 -o /tmp/realm/RealmSwift.xcframework/Info.plist /tmp/realm/Info-RealmSwift-Filtered.json
+
+          # Create our final zip files for the xcframeworks
+          cd /tmp/realm
+          zip --symlinks -r Realm.xcframework.zip Realm.xcframework
+          zip --symlinks -r RealmSwift.xcframework.zip RealmSwift.xcframework
+          echo "REALM_PATH=/tmp/realm/Realm.xcframework.zip" >> $GITHUB_ENV
+          echo "REALM_SWIFT_PATH=/tmp/realm/RealmSwift.xcframework.zip" >> $GITHUB_ENV
+      - name: Check out repo
+        uses: actions/checkout@v2
+      - name: Update Package.swift
+        run: |
+          # Update swift tools version to match original
+          swift_tools_version=$(curl -s https://raw.githubusercontent.com/realm/realm-swift/${{ env.LATEST_REALM }}/Package.swift | head -n 1 | cut -d':' -f2)
+          sed -i '' "1s#:.*#:$swift_tools_version#" ./Package.swift
+          
+          # Update download URL to contain new version
+          sed -i '' "s|/download/v[0-9]*.[0-9]*.[0-9]*/Realm.xcframework.zip|/download/${{ env.LATEST_REALM }}/Realm.xcframework.zip|" ./Package.swift
+          sed -i '' "s|/download/v[0-9]*.[0-9]*.[0-9]*/RealmSwift.xcframework.zip|/download/${{ env.LATEST_REALM }}/RealmSwift.xcframework.zip|" ./Package.swift
+
+          # Update checksums
+          realm_checksum=$(swift package compute-checksum ${{ env.REALM_PATH }})
+          realm_swift_checksum=$(swift package compute-checksum ${{ env.REALM_SWIFT_PATH }})
+          sed -i '' "s|checksum: \"[^\"]*\" // Realm|checksum: \"$realm_checksum\" // Realm|" ./Package.swift
+          sed -i '' "s|checksum: \"[^\"]*\" // RealmSwift|checksum: \"$realm_swift_checksum\" // RealmSwift|" ./Package.swift
+          cat ./Package.swift
+      - name: Get release notes from the original repository
+        run: |
+          # Download latest relase notes
+          release_notes=$(curl -s https://api.github.com/repos/realm/realm-swift/releases/tags/${{ env.LATEST_REALM }} | jq -r '.body')
+          echo "$release_notes" > /tmp/release_notes.txt
+          echo "RELEASE_NOTES=/tmp/release_notes.txt" >> $GITHUB_ENV
+      - name: Release new binaries
+        run: |
+          # Commit updated Package.swift
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git add .
+          git commit -m "chore(release): ${{ env.LATEST_REALM }}"
+          git push origin main
+          
+          # Tag and release new version
+          git tag ${{ env.LATEST_REALM }}
+          git push origin ${{ env.LATEST_REALM }}
+          gh release create ${{ env.LATEST_REALM }} ${{ env.REALM_PATH }} ${{ env.REALM_SWIFT_PATH }} -F ${{ env.RELEASE_NOTES }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
