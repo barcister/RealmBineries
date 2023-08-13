@@ -15,12 +15,12 @@ let package = Package(
     .binaryTarget(
         name: "Realm",
         url: "https://github.com/barcister/RealmBineries/releases/download/v10.42.2/Realm.xcframework.zip",
-        checksum: "a13cf785ac0f067ca23004947b5677db04733e94834211ce2aa6df7c266b61a3" // Realm
+        checksum: "0ca1bca3ca7f1da6ca0485869dbc0eb657f729e44334f61ed7ff4fa01d6db6ba" // Realm
     ),
     .binaryTarget(
         name: "RealmSwift",
         url: "https://github.com/barcister/RealmBineries/releases/download/v10.42.2/RealmSwift.xcframework.zip",
-        checksum: "15d8190831df41042991ce38c2bef29187d05d585076c83f089a5e856448ac76" // RealmSwift
+        checksum: "c319570368f7587c83d647c4c96965e45e4d30179a0ab50faea46ea26f1103a1" // RealmSwift
     )
   ]
 )
